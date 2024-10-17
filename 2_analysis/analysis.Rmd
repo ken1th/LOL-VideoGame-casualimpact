@@ -1,0 +1,249 @@
+---
+title: "Impact of League of Legends Release on North American Video Game Sales"
+author: "Kenith Chan"
+email: "kenith.ckl@gmail.com"
+date: "2024-10-16"
+---
+
+# Introduction
+
+This study aims to investigate the impact of the release of League of Legends (LOL) on video game sales in North America (NA). Specifically, the research question focuses on how the introduction of LOL, a highly popular multiplayer online battle arena (MOBA) game, influenced overall sales in the region. Given LOL’s rapid ascent in the gaming market and its ability to attract a massive player base, understanding its effects on consumer spending patterns provides valuable insights into market dynamics. By examining sales trends before and after LOL’s release, this analysis seeks to determine whether the game’s launch had a significant positive or negative impact on the sales of other video games in NA.
+
+To assess this impact, the study utilizes the CausalImpact package in R, which employs a Bayesian structural time-series model to estimate the causal effect of interventions in non-experimental settings. This approach allows for a robust comparison of actual sales data against a counterfactual prediction of what sales would have been without the intervention. By leveraging data from multiple sources, including video game sales and economic indicators, the CausalImpact framework enables a comprehensive analysis that accounts for various control variables. This methodological choice is particularly significant, as it not only clarifies the extent of LOL’s influence on NA video game sales but also provides a deeper understanding of the competitive landscape within the gaming industry.
+
+# Data Preparation
+
+## Load Required Libraries
+
+```{r setup, include=TRUE}
+# Install necessary packages if not already installed
+required_packages <- c("rio", "tidyverse", "lubridate", "CausalImpact", "ggplot2")
+installed_packages <- rownames(installed.packages())
+
+for(p in required_packages){
+  if(!(p %in% installed_packages)){
+    install.packages(p, dependencies = TRUE)
+  }
+}
+
+# Load libraries
+library(tidyverse)
+library(lubridate)
+library(CausalImpact)
+library(ggplot2)
+library(rio)
+```
+
+## Import Datasets
+```{r import_data}
+# Read video game sales data
+vgsales <- import("1_data/vgsales.csv")
+
+# Read World Bank datasets
+gdp_per_capita <- rio::import("1_data/gdppercapita_ppp_worldbank.csv", skip = 4, header = T)
+population <- rio::import("1_data/population_worldbank.csv", skip = 4, header = T)
+unemployment <- rio::import("1_data/unemployment_worldbank.csv", skip = 4, header = T)
+internet_users <- rio::import("1_data/internetuser_worldbank.csv", skip = 4, header = T)
+cpi <- rio::import("1_data/cpi_worldbank.csv", skip = 4, header = T)
+```
+
+## Data Cleaning and Transformation
+
+Outline the steps needed to clean and transform each dataset. This may include handling missing values, renaming columns for consistency, converting data types, and aggregating data as necessary.
+
+```{r data_cleaning}
+# World Bank Data
+#1. Remove unnecessary columns.
+#2. Filter data for the USA.
+#3. Pivot the data to long format.
+#4. Remove missing values.
+gdp_per_capita_NA <- gdp_per_capita %>%
+    select(-`Country Name`, -`Indicator Name`, -`Indicator Code`, -V69) %>%
+    filter(`Country Code` %in% c("USA")) %>%
+    pivot_longer(cols = -`Country Code`, names_to = "Year", values_to = "GDP_per_Capita_NA") %>%
+    filter(!is.na(GDP_per_Capita_NA)) %>%
+    select(-`Country Code`)
+
+population_NA <- population %>%
+    select(-`Country Name`, -`Indicator Name`, -`Indicator Code`, -V69) %>%
+    filter(`Country Code` %in% c("USA")) %>%
+    pivot_longer(cols = -`Country Code`, names_to = "Year", values_to = "Population_NA") %>%
+    filter(!is.na(Population_NA)) %>%
+    select(-`Country Code`)
+
+unemployment_NA <- unemployment %>%
+    select(-`Country Name`, -`Indicator Name`, -`Indicator Code`, -V69) %>%
+    filter(`Country Code` %in% c("USA")) %>%
+    pivot_longer(cols = -`Country Code`, names_to = "Year", values_to = "Unemployment_Rate_NA") %>%
+    filter(!is.na(Unemployment_Rate_NA)) %>%
+    select(-`Country Code`)
+
+internet_users_NA <- internet_users %>%
+    select(-`Country Name`, -`Indicator Name`, -`Indicator Code`, -V69) %>%
+    filter(`Country Code` %in% c("USA")) %>%
+    pivot_longer(cols = -`Country Code`, names_to = "Year", values_to = "Internet_Penetration_NA") %>%
+    filter(!is.na(Internet_Penetration_NA)) %>%
+    select(-`Country Code`)
+
+# inflation_cpi is used for adjusting video game sales data for inflation
+cpi_related <- cpi %>%
+    select(-`Country Name`, -`Indicator Name`, -`Indicator Code`, -V69) %>%
+    # Filter for USA, Japan, and euro main countries
+    filter(`Country Code` %in% c("USA", "JPN", "DEU", "FRA", "ITA", "GBR", "CHN")) %>%
+    pivot_longer(cols = -`Country Code`, names_to = "Year", values_to = "CPI") %>%
+    filter(!is.na(CPI)) %>%
+    pivot_wider(names_from = `Country Code`, names_prefix = "CPI_", values_from = CPI) %>%
+    mutate(
+        CPI_EU = rowMeans(select(., c("CPI_DEU", "CPI_FRA", "CPI_ITA", "CPI_GBR")), na.rm = TRUE)) %>%
+    mutate(
+        CPI_WLD = rowMeans(select(., c("CPI_USA", "CPI_JPN", "CPI_EU", "CPI_CHN")), na.rm = TRUE)) %>%
+    select(Year, CPI_USA, CPI_JPN, CPI_EU, CPI_WLD)
+
+# Video Game Sales Data
+vgsales_annual <- vgsales %>%
+  group_by(Year) %>%
+  summarise(
+    NA_Sales = sum(NA_Sales, na.rm = TRUE),
+    EU_Sales = sum(EU_Sales, na.rm = TRUE),
+    JP_Sales = sum(JP_Sales, na.rm = TRUE),
+    Other_Sales = sum(Other_Sales, na.rm = TRUE),
+    Num_Game_Releases = n()
+  ) %>%
+  merge(cpi_related, by = "Year") %>%
+  mutate(
+    NA_Sales_adjusted = NA_Sales / CPI_USA ,
+    EU_Sales_adjusted = EU_Sales / CPI_EU ,
+    JP_Sales_adjusted = JP_Sales / CPI_JPN ,
+    Other_Sales_adjusted = Other_Sales / CPI_WLD
+    ) %>%
+  select(Year, Num_Game_Releases, NA_Sales_adjusted, EU_Sales_adjusted, JP_Sales_adjusted, Other_Sales_adjusted)
+```
+
+# Merge Datasets
+
+Combine all cleaned datasets into a single dataframe, ensuring alignment by year.
+
+```{r merge_data}
+# Merge with World Bank data
+merged_data <- vgsales_annual %>%
+    left_join(gdp_per_capita_NA, by = "Year") %>%
+    left_join(population_NA, by = "Year") %>%
+    left_join(unemployment_NA, by = "Year") %>%
+    left_join(internet_users_NA, by = "Year") %>%
+    mutate(Year = as.numeric(Year)) %>%
+    filter(Year > 1990 & Year <= 2015) %>%
+    arrange(Year)
+```
+
+
+# Exploratory Data Analysis (EDA)
+
+Conduct initial analyses to understand trends, correlations, and patterns in the data.
+
+## Time Series Plots
+
+```{r time_series_plots}
+# Plot sales per game over time
+ggplot(merged_data, aes(x = Year)) +
+  geom_line(aes(y = NA_Sales_adjusted, color = "NA Sales")) +
+  geom_line(aes(y = EU_Sales_adjusted, color = "EU Sales")) +
+  geom_line(aes(y = JP_Sales_adjusted, color = "JP Sales")) +
+  geom_line(aes(y = Other_Sales_adjusted, color = "Other Sales")) +
+  labs(title = "Video Game Sales Over Time",
+       x = "Year",
+       y = "Adjusted Sales (USD)",
+       color = "Region") +
+  scale_color_manual(values = c("NA Sales" = "blue", "EU Sales" = "red", "JP Sales" = "green", "Other Sales" = "purple")) +
+  theme_minimal()
+```
+
+## Correlation Analysis
+
+```{r correlation_analysis}
+# Calculate correlation matrix
+cor_matrix <- merged_data %>%
+  select(-Year) %>%
+  # scale the data by column
+  mutate(across(where(is.numeric), ~ scale(.)[,1])) %>%
+  cor(use = "complete.obs")
+
+# Display correlation matrix
+print(cor_matrix)
+
+# Optional: Visualize correlation matrix
+library(corrplot)
+corrplot(cor_matrix, method = "circle", type = "lower", tl.col = "black", tl.srt = 45)
+```
+
+# Defining the Intervention
+
+Intervention Details
+
+	•	Event: Release of League of Legends (LOL) in North America
+	•	Date of Release: October 27, 2009
+	•	Year of Intervention: 2009
+
+Assumption: The impact will be analyzed from 2010 onwards.
+
+# Preparing Data for CausalImpact
+
+## Define Pre- and Post-Intervention Periods
+
+```{r define_periods}
+# Define the year of intervention
+intervention_year <- 2009
+
+# Define pre and post periods
+pre_period <- c(1991, intervention_year)
+post_period <- c(intervention_year + 1, 2015)
+```
+
+# Running the CausalImpact Analysis
+
+Execute the CausalImpact analysis using the prepared data.
+
+```{r causal_impact_analysis}
+# Create CausalImpact object
+ci <- CausalImpact(
+  data = merged_data %>% select(-Year) %>% relocate(NA_Sales_adjusted) %>% zoo(c(1991:2015)),
+  pre_period, post_period)
+
+# Print summary
+print(summary(ci))
+
+# Print report
+print(summary(ci, "report"))
+
+# Plot the results
+# adjust the x-axis labels by adding the 1990 to the x-axis values
+plot(ci)
+# save the plot
+ggsave("2_analysis/causal_impact_plot.png")
+```
+
+# Results
+
+## Analysis report {CausalImpact}
+
+Analysis report {CausalImpact}
+
+
+During the post-intervention period, the response variable had an average value of approx. 1.74. By contrast, in the absence of an intervention, we would have expected an average response of 2.63. The 95% interval of this counterfactual prediction is [2.05, 4.04]. Subtracting this prediction from the observed response yields an estimate of the causal effect the intervention had on the response variable. This effect is -0.88 with a 95% interval of [-2.30, -0.30]. For a discussion of the significance of this effect, see below.
+
+Summing up the individual data points during the post-intervention period (which can only sometimes be meaningfully interpreted), the response variable had an overall value of 10.46. By contrast, had the intervention not taken place, we would have expected a sum of 15.77. The 95% interval of this prediction is [12.28, 24.26].
+
+The above results are given in terms of absolute numbers. In relative terms, the response variable showed a decrease of -33%. The 95% interval of this percentage is [-57%, -15%].
+
+This means that the negative effect observed during the intervention period is statistically significant. If the experimenter had expected a positive effect, it is recommended to double-check whether anomalies in the control variables may have caused an overly optimistic expectation of what should have happened in the response variable in the absence of the intervention.
+
+The probability of obtaining this effect by chance is very small (Bayesian one-sided tail-area probability p = 0.007). This means the causal effect can be considered statistically significant.
+
+# Conclusion
+In conclusion, this study aimed to evaluate the impact of League of Legends (LOL)’s release on video game sales in North America (NA) using the CausalImpact package in R. The research question focused on determining whether the release of this popular multiplayer online battle arena (MOBA) game influenced the overall sales of other video games in the NA market. Through the analysis, it was found that the introduction of LOL led to a significant decrease in NA video game sales, with a 33% reduction compared to what would have been expected in the absence of this intervention. This decrease was statistically significant, indicating that the shift in consumer interest towards LOL might have detracted from sales of other games during the post-intervention period.
+
+The significance of this analysis lies in its ability to quantify the influence of a major game release on broader market trends using a robust, data-driven approach. The use of the CausalImpact package allowed for a careful comparison between actual and predicted sales, taking into account various control variables such as economic factors and sales trends in other regions. This study provides valuable insights into the competitive dynamics of the video game industry, demonstrating how blockbuster titles like LOL can reshape consumer preferences and market outcomes. Such insights are essential for game developers, marketers, and industry analysts in planning strategic releases and understanding the potential market impacts of similar disruptive titles.
+
+# References
+    - Video Game Sales Dataset: https://www.kaggle.com/datasets/gregorut/videogamesales
+	- World Bank Open Data: https://data.worldbank.org/
+	- CausalImpact Package Documentation: https://google.github.io/CausalImpact/CausalImpact.html
